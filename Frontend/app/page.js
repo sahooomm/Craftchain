@@ -5,9 +5,12 @@ import { ArrowRight, Package, FileText, Eye, Shield, Sparkles, Users, Lock, Glob
 import { useWallet } from '@/hooks/usewallet';
 import { formatAddress } from '@/lib/ethers';
 import { useState, useEffect } from 'react';
+import { useContract } from '@/hooks/usecontract';
+import { uploadJSON, uploadFile } from '@/lib/ipfs';
 
 export default function Home() {
   const { account, isConnected, connect, disconnect, loading } = useWallet();
+  const { contract, contractWithSigner } = useContract();
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authMode, setAuthMode] = useState('login'); // 'login' or 'register'
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -22,6 +25,24 @@ export default function Home() {
   });
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+
+  // Token ID and step data for recording
+  const [tokenId, setTokenId] = useState('');
+  const [isOwner, setIsOwner] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [verified, setVerified] = useState(false);
+  const [stepData, setStepData] = useState({
+    stepType: '',
+    description: '',
+    location: '',
+    notes: '',
+  });
+  const [photoFiles, setPhotoFiles] = useState([]);
+  const [photoPreviews, setPhotoPreviews] = useState([]);
+  const [loadingStep, setLoadingStep] = useState(false);
+  const [status, setStatus] = useState('');
+  const [errorStep, setErrorStep] = useState('');
+  const [successStep, setSuccessStep] = useState(false);
 
   // Check if user is logged in on mount
   useEffect(() => {
@@ -168,573 +189,430 @@ export default function Home() {
     setSuccess('');
   };
 
-  return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-950 via-purple-950 to-slate-950">
-      
-      {/* Auth Modal */}
-      {showAuthModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-gradient-to-br from-slate-900 to-purple-900 border border-white/20 rounded-3xl p-8 max-w-md w-full relative shadow-2xl">
-            <button
-              onClick={() => setShowAuthModal(false)}
-              className="absolute top-6 right-6 text-white/60 hover:text-white transition-colors"
-            >
-              <X className="w-6 h-6" />
-            </button>
+  const handleVerifyOwnership = async () => {
+    if (!tokenId) {
+      setError('Please enter a token ID');
+      return;
+    }
 
-            <div className="text-center mb-8">
-              <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center">
-                {authMode === 'login' ? <LogIn className="w-8 h-8 text-white" /> : <UserPlus className="w-8 h-8 text-white" />}
+    if (!isConnected) {
+      try {
+        await connect();
+      } catch (err) {
+        setError('Please connect your wallet first');
+        return;
+      }
+    }
+
+    setChecking(true);
+    setError('');
+    setIsOwner(false);
+    setVerified(false);
+
+    try {
+      const owner = await contract.ownerOf(tokenId);
+      
+      if (owner.toLowerCase() === account.toLowerCase()) {
+        setIsOwner(true);
+        setVerified(true);
+      } else {
+        setError(`You do not own token #${tokenId}. Current owner: ${owner.substring(0, 10)}...`);
+      }
+    } catch (err) {
+      console.error('Error verifying ownership:', err);
+      setError('Token not found or invalid token ID');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const handlePhotoChange = (e) => {
+    const files = Array.from(e.target.files);
+    setPhotoFiles(prev => [...prev, ...files]);
+    
+    files.forEach(file => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setPhotoPreviews(prev => [...prev, reader.result]);
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const removePhoto = (index) => {
+    setPhotoFiles(prev => prev.filter((_, i) => i !== index));
+    setPhotoPreviews(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+
+    if (!isOwner) {
+      setError('Please verify ownership first');
+      return;
+    }
+
+    setLoadingStep(true);
+    setErrorStep('');
+    setSuccessStep(false);
+    setStatus('');
+
+    try {
+      let photoUris = [];
+      if (photoFiles.length > 0) {
+        setStatus(`📤 Uploading ${photoFiles.length} photo(s) to IPFS...`);
+        photoUris = await Promise.all(
+          photoFiles.map(file => uploadFile(file))
+        );
+      }
+
+      const stepDataToUpload = {
+        stepType: stepData.stepType,
+        description: stepData.description,
+        location: stepData.location,
+        notes: stepData.notes,
+        actor: account,
+        timestamp: new Date().toISOString(),
+        photos: photoUris,
+      };
+
+      setStatus('📤 Uploading step data to IPFS...');
+      const stepDataUri = await uploadJSON(stepDataToUpload);
+
+      setStatus('⛓️ Recording step on blockchain...');
+      const tx = await contractWithSigner.recordStep(tokenId, stepDataUri);
+      
+      setStatus('⏳ Waiting for confirmation...');
+      await tx.wait();
+
+      setSuccessStep(true);
+      setStatus('');
+      
+      setStepData({
+        stepType: '',
+        description: '',
+        location: '',
+        notes: '',
+      });
+      setPhotoFiles([]);
+      setPhotoPreviews([]);
+      
+    } catch (err) {
+      console.error('Error recording step:', err);
+      setErrorStep(err.message || 'Failed to record step. Please try again.');
+      setStatus('');
+    } finally {
+      setLoadingStep(false);
+    }
+  };
+
+  const stepTypes = [
+    { value: 'quality-check', label: 'Quality Check', icon: '✓' },
+    { value: 'packaging', label: 'Packaging', icon: '📦' },
+    { value: 'shipped', label: 'Shipped', icon: '🚚' },
+    { value: 'received', label: 'Received', icon: '📥' },
+    { value: 'inspection', label: 'Inspection', icon: '🔍' },
+    { value: 'storage', label: 'Storage', icon: '🏭' },
+    { value: 'custom', label: 'Custom', icon: '⚙️' },
+  ];
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 relative overflow-hidden">
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-20 left-20 w-72 h-72 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse"></div>
+        <div className="absolute top-40 right-20 w-72 h-72 bg-pink-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse" style={{animationDelay: '2s'}}></div>
+        <div className="absolute bottom-20 left-1/2 w-72 h-72 bg-blue-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-pulse" style={{animationDelay: '4s'}}></div>
+      </div>
+
+      <div className="relative z-10 container mx-auto px-4 py-8 md:py-16">
+        <div className="max-w-4xl mx-auto">
+          <div className="text-center mb-12 space-y-4">
+            <div className="inline-flex items-center gap-2 px-4 py-2 bg-white/10 backdrop-blur-lg rounded-full border border-white/20 mb-4">
+              <Sparkles className="w-4 h-4 text-yellow-400" />
+              <span className="text-sm font-medium text-white">Supply Chain Management</span>
+            </div>
+            <h1 className="text-5xl md:text-6xl font-bold text-white mb-4 tracking-tight">
+              Record New <span className="bg-gradient-to-r from-purple-400 to-pink-400 text-transparent bg-clip-text">Journey Step</span>
+            </h1>
+            <p className="text-lg text-white/60 max-w-2xl mx-auto">
+              Track and verify every milestone in your product&apos;s supply chain with blockchain-powered transparency
+            </p>
+          </div>
+
+          <div className="space-y-6">
+            <div className="group bg-white/5 backdrop-blur-xl rounded-3xl border border-white/10 p-8 hover:bg-white/10 transition-all duration-300 shadow-2xl">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl flex items-center justify-center font-bold text-white shadow-lg">
+                  1
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                    <Shield className="w-6 h-6" />
+                    Verify Ownership
+                  </h2>
+                  <p className="text-white/60 text-sm">Confirm your token ownership to proceed</p>
+                </div>
               </div>
-              <h2 className="text-3xl font-black text-white mb-2">
-                {authMode === 'login' ? 'Welcome Back' : 'Create Account'}
-              </h2>
-              <p className="text-white/60">
-                {authMode === 'login' ? 'Login with your wallet' : 'Register your account'}
-              </p>
+              
+              <div className="flex gap-3">
+                <div className="flex-1 relative">
+                  <input
+                    type="number"
+                    value={tokenId}
+                    onChange={(e) => setTokenId(e.target.value)}
+                    placeholder="Enter Token ID (e.g., 0, 1, 2...)"
+                    disabled={verified}
+                    className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl text-white placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all disabled:opacity-50"
+                  />
+                  <Package className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/40" />
+                </div>
+                <button
+                  onClick={handleVerifyOwnership}
+                  disabled={checking || verified}
+                  className="px-8 py-4 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white font-semibold rounded-2xl transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl hover:scale-105 flex items-center gap-2"
+                >
+                  {checking ? (
+                    <Loader2 className="animate-spin w-5 h-5" />
+                  ) : verified ? (
+                    <>
+                      <CheckCircle className="w-5 h-5" />
+                      Verified
+                    </>
+                  ) : (
+                    <>
+                      Verify
+                      <ArrowRight className="w-5 h-5" />
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {verified && (
+                <div className="mt-6 flex items-center gap-3 p-4 bg-green-500/10 border border-green-500/30 rounded-2xl">
+                  <div className="w-10 h-10 bg-green-500/20 rounded-full flex items-center justify-center">
+                    <CheckCircle className="w-6 h-6 text-green-400" />
+                  </div>
+                  <div>
+                    <p className="text-green-400 font-semibold">Ownership Confirmed</p>
+                    <p className="text-white/60 text-sm">You own Token #{tokenId}</p>
+                  </div>
+                </div>
+              )}
+
+              {!isConnected && (
+                <div className="mt-6 p-6 bg-orange-500/10 border border-orange-500/30 rounded-2xl">
+                  <div className="flex items-start gap-4">
+                    <div className="w-12 h-12 bg-orange-500/20 rounded-full flex items-center justify-center flex-shrink-0">
+                      <AlertCircle className="w-6 h-6 text-orange-400" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-white font-semibold mb-1">Wallet Connection Required</p>
+                      <p className="text-white/60 text-sm mb-4">Connect your wallet to verify token ownership and continue</p>
+                      <button 
+                        onClick={connect} 
+                        className="px-6 py-3 bg-gradient-to-r from-orange-500 to-pink-500 text-white font-semibold rounded-xl hover:shadow-lg transition-all"
+                      >
+                        Connect Wallet
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             {error && (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 mb-6">
-                <p className="text-red-400 text-sm">{error}</p>
+              <div className="bg-red-500/10 backdrop-blur-xl border border-red-500/30 rounded-2xl p-6">
+                <div className="flex items-start gap-4">
+                  <div className="w-10 h-10 bg-red-500/20 rounded-full flex items-center justify-center flex-shrink-0">
+                    <AlertCircle className="w-6 h-6 text-red-400" />
+                  </div>
+                  <div>
+                    <p className="text-red-400 font-semibold mb-1">Verification Failed</p>
+                    <p className="text-white/80 text-sm">{error}</p>
+                  </div>
+                </div>
               </div>
             )}
 
             {success && (
-              <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 mb-6">
-                <p className="text-green-400 text-sm flex items-center gap-2">
-                  <Sparkles className="w-4 h-4" />
-                  {success}
-                </p>
+              <div className="bg-green-500/10 backdrop-blur-xl border border-green-500/30 rounded-2xl p-6">
+                <div className="flex items-start gap-4">
+                  <div className="w-12 h-12 bg-green-500/20 rounded-full flex items-center justify-center flex-shrink-0">
+                    <CheckCircle className="w-7 h-7 text-green-400" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-white font-bold text-xl mb-2">Step Recorded Successfully!</p>
+                    <p className="text-white/70 mb-4">Your update has been permanently recorded on the blockchain</p>
+                    <a 
+                      href={`/view/${tokenId}`}
+                      className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-green-500 to-emerald-500 text-white font-semibold rounded-xl hover:shadow-lg transition-all"
+                    >
+                      View Timeline
+                      <ArrowRight className="w-5 h-5" />
+                    </a>
+                  </div>
+                </div>
               </div>
             )}
 
-            {authMode === 'register' ? (
-              <form onSubmit={handleRegister} className="space-y-5">
-                <div>
-                  <label className="block text-white/80 font-semibold mb-2 text-sm">Full Name *</label>
-                  <input
-                    type="text"
-                    value={formData.name}
-                    onChange={(e) => setFormData({...formData, name: e.target.value})}
-                    placeholder="John Doe"
+            {status && (
+              <div className="bg-purple-500/10 backdrop-blur-xl border border-purple-500/30 rounded-2xl p-6">
+                <div className="flex items-center gap-4">
+                  <Loader2 className="animate-spin w-6 h-6 text-purple-400" />
+                  <p className="text-white font-medium">{status}</p>
+                </div>
+              </div>
+            )}
+
+            {verified && (
+              <form onSubmit={handleSubmit} className="bg-white/5 backdrop-blur-xl rounded-3xl border border-white/10 p-8 space-y-8 shadow-2xl">
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl flex items-center justify-center font-bold text-white shadow-lg">
+                    2
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                      <FileText className="w-6 h-6" />
+                      Add Step Details
+                    </h2>
+                    <p className="text-white/60 text-sm">Provide comprehensive information about this milestone</p>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <label className="block text-sm font-semibold text-white/90 flex items-center gap-2">
+                    <Clock className="w-4 h-4" />
+                    Step Type *
+                  </label>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {stepTypes.map((type) => (
+                      <button
+                        key={type.value}
+                        type="button"
+                        onClick={() => setStepData({...stepData, stepType: type.value})}
+                        className={`p-4 rounded-2xl border-2 transition-all text-center ${
+                          stepData.stepType === type.value
+                            ? 'bg-purple-500/20 border-purple-500 shadow-lg scale-105'
+                            : 'bg-white/5 border-white/10 hover:bg-white/10 hover:border-white/20'
+                        }`}
+                      >
+                        <div className="text-2xl mb-2">{type.icon}</div>
+                        <div className="text-xs font-medium text-white">{type.label}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <label className="block text-sm font-semibold text-white/90">
+                    Description *
+                  </label>
+                  <textarea
+                    value={stepData.description}
+                    onChange={(e) => setStepData({...stepData, description: e.target.value})}
+                    placeholder="Provide detailed information about this step in the supply chain..."
+                    rows={4}
                     required
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-white/40 focus:outline-none focus:border-purple-500/50 transition-all"
+                    className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl text-white placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all resize-none"
                   />
                 </div>
 
-                <div>
-                  <label className="block text-white/80 font-semibold mb-2 text-sm">Email Address *</label>
-                  <input
-                    type="email"
-                    value={formData.email}
-                    onChange={(e) => setFormData({...formData, email: e.target.value})}
-                    placeholder="john@example.com"
-                    required
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-white/40 focus:outline-none focus:border-purple-500/50 transition-all"
+                <div className="space-y-3">
+                  <label className="block text-sm font-semibold text-white/90 flex items-center gap-2">
+                    <MapPin className="w-4 h-4" />
+                    Location *
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={stepData.location}
+                      onChange={(e) => setStepData({...stepData, location: e.target.value})}
+                      placeholder="e.g., Mumbai Warehouse, Delhi Distribution Center"
+                      required
+                      className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl text-white placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
+                    />
+                    <MapPin className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/40" />
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <label className="block text-sm font-semibold text-white/90">
+                    Additional Notes (Optional)
+                  </label>
+                  <textarea
+                    value={stepData.notes}
+                    onChange={(e) => setStepData({...stepData, notes: e.target.value})}
+                    placeholder="Any additional information or special remarks..."
+                    rows={3}
+                    className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl text-white placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all resize-none"
                   />
                 </div>
 
-                <div>
-                  <label className="block text-white/80 font-semibold mb-2 text-sm">Password *</label>
-                  <input
-                    type="password"
-                    value={formData.password}
-                    onChange={(e) => setFormData({...formData, password: e.target.value})}
-                    placeholder="At least 6 characters"
-                    required
-                    minLength={6}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-white/40 focus:outline-none focus:border-purple-500/50 transition-all"
-                  />
-                </div>
+                <div className="space-y-3">
+                  <label className="block text-sm font-semibold text-white/90 flex items-center gap-2">
+                    <Camera className="w-4 h-4" />
+                    Supporting Photos (Optional)
+                  </label>
+                  <label className="block cursor-pointer group">
+                    <div className="border-2 border-dashed border-white/20 rounded-2xl p-8 text-center hover:border-purple-500 hover:bg-white/5 transition-all">
+                      <Upload className="w-12 h-12 mx-auto mb-3 text-purple-400 group-hover:scale-110 transition-transform" />
+                      <p className="text-white/80 font-medium mb-1">Click to upload photos</p>
+                      <p className="text-xs text-white/50">Multiple files supported &bull; PNG, JPG, JPEG</p>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        onChange={handlePhotoChange}
+                        className="hidden"
+                      />
+                    </div>
+                  </label>
 
-                <div className="bg-purple-500/10 border border-purple-500/20 rounded-xl p-4">
-                  <p className="text-white/70 text-xs flex items-center gap-2">
-                    <Lock className="w-4 h-4" />
-                    Your account will be created securely with encrypted password
-                  </p>
+                  {photoPreviews.length > 0 && (
+                    <div className="grid grid-cols-3 md:grid-cols-4 gap-4 mt-4">
+                      {photoPreviews.map((preview, index) => (
+                        <div key={index} className="relative group">
+                          <img
+                            src={preview}
+                            alt={`Preview ${index + 1}`}
+                            className="w-full h-32 object-cover rounded-2xl border border-white/10"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removePhoto(index)}
+                            className="absolute -top-2 -right-2 w-8 h-8 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all hover:scale-110 shadow-lg"
+                          >
+                            <X className="w-5 h-5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <button
                   type="submit"
-                  disabled={authLoading}
-                  className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white font-bold py-4 rounded-xl transition-all duration-300 disabled:opacity-50 flex items-center justify-center gap-2"
+                  disabled={loadingStep}
+                  className="w-full py-5 bg-gradient-to-r from-purple-500 via-pink-500 to-purple-500 text-white font-bold text-lg rounded-2xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-2xl hover:shadow-purple-500/50 hover:scale-105 flex items-center justify-center gap-3"
                 >
-                  {authLoading ? (
+                  {loadingStep ? (
                     <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Processing...
+                      <Loader2 className="animate-spin w-6 h-6" />
+                      {status || 'Recording...'}
                     </>
                   ) : (
                     <>
-                      <UserPlus className="w-5 h-5" />
-                      Register Account
+                      <Sparkles className="w-6 h-6" />
+                      Record Step on Blockchain
+                      <ArrowRight className="w-6 h-6" />
                     </>
                   )}
                 </button>
-
-                <p className="text-center text-white/60 text-sm">
-                  Already have an account?{' '}
-                  <button
-                    type="button"
-                    onClick={() => setAuthMode('login')}
-                    className="text-purple-400 hover:text-purple-300 font-semibold"
-                  >
-                    Login
-                  </button>
-                </p>
               </form>
-            ) : (
-              <div className="space-y-5">
-                <div className="bg-purple-500/10 border border-purple-500/20 rounded-xl p-4">
-                  <p className="text-white/70 text-sm flex items-center gap-2">
-                    <Lock className="w-4 h-4" />
-                    Connect your wallet to login automatically
-                  </p>
-                </div>
-
-                <button
-                  onClick={handleLogin}
-                  disabled={authLoading}
-                  className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white font-bold py-4 rounded-xl transition-all duration-300 disabled:opacity-50 flex items-center justify-center gap-2"
-                >
-                  {authLoading ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      Connecting...
-                    </>
-                  ) : (
-                    <>
-                      <LogIn className="w-5 h-5" />
-                      Login with Wallet
-                    </>
-                  )}
-                </button>
-
-                <p className="text-center text-white/60 text-sm">
-                  Don&apos;t have an account?{' '}
-                  <button
-                    type="button"
-                    onClick={() => setAuthMode('register')}
-                    className="text-purple-400 hover:text-purple-300 font-semibold"
-                  >
-                    Register
-                  </button>
-                </p>
-              </div>
             )}
           </div>
         </div>
-      )}
-
-      {/* Hero Section with Animated Background */}
-      <section className="relative overflow-hidden">
-        {/* Animated gradient orbs */}
-        <div className="absolute top-20 left-10 w-96 h-96 bg-purple-600/30 rounded-full blur-3xl animate-pulse"></div>
-        <div className="absolute bottom-20 right-10 w-96 h-96 bg-pink-600/30 rounded-full blur-3xl animate-pulse delay-1000"></div>
-        
-        <div className="relative container mx-auto px-6 py-24 md:py-36">
-          <div className="max-w-5xl mx-auto">
-            
-            {/* Announcement Badge */}
-            <div className="flex justify-center mb-8">
-              <div className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-purple-500/20 to-pink-500/20 backdrop-blur-md border border-purple-500/30 rounded-full">
-                <Sparkles className="w-4 h-4 text-purple-400" />
-                <span className="text-sm font-semibold text-white/90">Blockchain Authentication Platform</span>
-                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-              </div>
-            </div>
-            
-            {/* Main Headline */}
-            <h1 className="text-6xl md:text-8xl font-black text-center mb-8 leading-tight">
-              <span className="bg-gradient-to-r from-blue-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
-                Authenticity
-              </span>
-              <br />
-              <span className="text-white">Meets Innovation</span>
-            </h1>
-            
-            {/* Subheadline */}
-            <p className="text-xl md:text-2xl text-center text-white/60 mb-12 max-w-3xl mx-auto leading-relaxed">
-              Revolutionize product verification with decentralized blockchain technology. 
-              Create verifiable digital certificates for your crafted goods in minutes.
-            </p>
-            
-            {/* Auth Buttons Section */}
-            {!isAuthenticated ? (
-              <div className="flex flex-col sm:flex-row gap-5 justify-center mb-16">
-                <button 
-                  onClick={() => openAuthModal('login')}
-                  disabled={loading}
-                  className="group relative overflow-hidden bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white font-bold px-10 py-5 rounded-2xl transition-all duration-300 transform hover:scale-105 shadow-2xl disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 transform -skew-x-12 -translate-x-full group-hover:translate-x-full transition-transform duration-1000"></div>
-                  <span className="relative flex items-center justify-center gap-3 text-lg">
-                    <LogIn className="w-5 h-5" />
-                    {loading ? 'Connecting...' : 'Login with Wallet'}
-                  </span>
-                </button>
-                
-                <button 
-                  onClick={() => openAuthModal('register')}
-                  disabled={loading}
-                  className="group relative overflow-hidden bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white font-bold px-10 py-5 rounded-2xl transition-all duration-300 transform hover:scale-105 shadow-2xl disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 transform -skew-x-12 -translate-x-full group-hover:translate-x-full transition-transform duration-1000"></div>
-                  <span className="relative flex items-center justify-center gap-3 text-lg">
-                    <UserPlus className="w-5 h-5" />
-                    {loading ? 'Connecting...' : 'Register Account'}
-                  </span>
-                </button>
-              </div>
-            ) : (
-              <div className="flex flex-col items-center gap-5 mb-16">
-                {/* Connected Status Card */}
-                <div className="bg-gradient-to-r from-green-500/20 to-emerald-500/20 backdrop-blur-xl border border-green-500/30 rounded-2xl px-8 py-4 flex items-center gap-4">
-                  <div className="w-3 h-3 bg-green-400 rounded-full animate-pulse"></div>
-                  <div>
-                    <div className="text-sm text-white/60 font-medium">Welcome back, {userData?.name}!</div>
-                    <div className="text-white font-bold text-lg">{formatAddress(userData?.walletAddress || account)}</div>
-                  </div>
-                </div>
-
-                <div className="flex flex-col sm:flex-row gap-4">
-                  <Link 
-                    href="/mint" 
-                    className="group relative overflow-hidden bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white font-bold px-10 py-5 rounded-2xl transition-all duration-300 transform hover:scale-105 shadow-2xl"
-                  >
-                    <div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 transform -skew-x-12 -translate-x-full group-hover:translate-x-full transition-transform duration-1000"></div>
-                    <span className="relative flex items-center justify-center gap-3 text-lg">
-                      Start Creating
-                      <ArrowRight className="w-5 h-5" />
-                    </span>
-                  </Link>
-                  
-                  <Link 
-                    href="/view" 
-                    className="bg-white/10 hover:bg-white/20 backdrop-blur-xl border border-white/20 text-white font-bold px-10 py-5 rounded-2xl transition-all duration-300 flex items-center justify-center gap-3 text-lg shadow-xl"
-                  >
-                    Explore Batches
-                    <Eye className="w-5 h-5" />
-                  </Link>
-
-                  <button 
-                    onClick={handleLogout}
-                    className="bg-red-500/20 hover:bg-red-500/30 backdrop-blur-xl border border-red-500/30 text-red-400 font-bold px-10 py-5 rounded-2xl transition-all duration-300 flex items-center justify-center gap-3 text-lg shadow-xl"
-                  >
-                    <LogOut className="w-5 h-5" />
-                    Logout
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Stats Bar */}
-            <div className="grid grid-cols-3 gap-6 max-w-3xl mx-auto">
-              {[
-                { value: '10K+', label: 'Batches Created' },
-                { value: '50+', label: 'Active Artisans' },
-                { value: '100%', label: 'Secure & Verified' },
-              ].map((stat, i) => (
-                <div key={i} className="text-center">
-                  <div className="text-3xl md:text-4xl font-black bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent mb-1">
-                    {stat.value}
-                  </div>
-                  <div className="text-sm text-white/50 font-medium">{stat.label}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Process Flow Section */}
-      <section className="container mx-auto px-6 py-24">
-        <div className="max-w-6xl mx-auto">
-          <div className="text-center mb-20">
-            <h2 className="text-5xl md:text-6xl font-black mb-5 text-white">
-              Simple. Powerful. Secure.
-            </h2>
-            <p className="text-xl text-white/60 max-w-2xl mx-auto">
-              Our streamlined process makes blockchain authentication accessible to everyone
-            </p>
-          </div>
-
-          <div className="grid md:grid-cols-4 gap-6">
-            {[
-              { icon: Package, title: 'Upload', desc: 'Add product details and images', color: 'from-blue-500 to-cyan-500' },
-              { icon: Lock, title: 'Secure', desc: 'Data stored on IPFS', color: 'from-purple-500 to-pink-500' },
-              { icon: Zap, title: 'Mint', desc: 'Create blockchain certificate', color: 'from-orange-500 to-red-500' },
-              { icon: CheckCircle, title: 'Verify', desc: 'Share proof of authenticity', color: 'from-green-500 to-emerald-500' },
-            ].map((step, i) => (
-              <div key={i} className="relative group">
-                <div className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-8 hover:bg-white/10 transition-all duration-300 h-full">
-                  <div className={`w-16 h-16 rounded-2xl bg-gradient-to-br ${step.color} flex items-center justify-center mb-5 group-hover:scale-110 transition-transform duration-300`}>
-                    <step.icon className="w-8 h-8 text-white" />
-                  </div>
-                  <h3 className="text-2xl font-bold text-white mb-3">{step.title}</h3>
-                  <p className="text-white/60">{step.desc}</p>
-                </div>
-                {i < 3 && (
-                  <div className="hidden md:block absolute top-1/2 -right-3 w-6 h-0.5 bg-gradient-to-r from-purple-500/50 to-transparent transform -translate-y-1/2"></div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Features Grid */}
-      <section className="container mx-auto px-6 py-24 relative">
-        <div className="absolute inset-0 bg-gradient-to-r from-purple-500/5 to-pink-500/5 blur-3xl"></div>
-        
-        <div className="relative max-w-6xl mx-auto">
-          <div className="text-center mb-20">
-            <div className="inline-flex items-center gap-2 px-4 py-2 bg-purple-500/10 border border-purple-500/20 rounded-full mb-6">
-              <Shield className="w-4 h-4 text-purple-400" />
-              <span className="text-sm font-semibold text-purple-400">Enterprise-Grade Security</span>
-            </div>
-            <h2 className="text-5xl md:text-6xl font-black mb-5 text-white">
-              Built for Modern Creators
-            </h2>
-            <p className="text-xl text-white/60 max-w-2xl mx-auto">
-              Advanced features designed to protect and promote your craft
-            </p>
-          </div>
-
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
-            {[
-              {
-                icon: Globe,
-                title: 'Decentralized Storage',
-                description: 'Your data lives on IPFS, ensuring permanent availability and censorship resistance.',
-                accent: 'blue'
-              },
-              {
-                icon: Lock,
-                title: 'Cryptographic Proof',
-                description: 'Every certificate is mathematically verified on the Ethereum blockchain.',
-                accent: 'purple'
-              },
-              {
-                icon: Eye,
-                title: 'Public Verification',
-                description: 'Anyone can verify authenticity without revealing sensitive business data.',
-                accent: 'pink'
-              },
-              {
-                icon: TrendingUp,
-                title: 'Value Appreciation',
-                description: 'Build brand reputation through transparent provenance tracking.',
-                accent: 'green'
-              },
-              {
-                icon: Users,
-                title: 'Community Building',
-                description: 'Connect with buyers who value craftsmanship and transparency.',
-                accent: 'orange'
-              },
-              {
-                icon: Sparkles,
-                title: 'NFT Standards',
-                description: 'Built on ERC-721 for maximum compatibility and future-proofing.',
-                accent: 'cyan'
-              },
-            ].map((feature, i) => (
-              <div 
-                key={i} 
-                className="group bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-8 hover:bg-white/10 hover:border-white/20 transition-all duration-300 hover:-translate-y-2"
-              >
-                <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-purple-500/20 to-pink-500/20 flex items-center justify-center mb-6 group-hover:scale-110 transition-transform duration-300">
-                  <feature.icon className="w-7 h-7 text-purple-400" />
-                </div>
-                <h3 className="text-xl font-bold text-white mb-3">{feature.title}</h3>
-                <p className="text-white/60 leading-relaxed">{feature.description}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Testimonial-Style Section */}
-      <section className="container mx-auto px-6 py-24">
-        <div className="max-w-5xl mx-auto">
-          <div className="bg-gradient-to-br from-purple-500/10 to-pink-500/10 backdrop-blur-xl border border-purple-500/20 rounded-3xl p-12 md:p-16">
-            <div className="grid md:grid-cols-2 gap-12 items-center">
-              <div>
-                <div className="text-6xl mb-6">🎨</div>
-                <h3 className="text-3xl md:text-4xl font-black text-white mb-6">
-                  Empowering Artisans Worldwide
-                </h3>
-                <p className="text-lg text-white/70 mb-8 leading-relaxed">
-                  From traditional weavers to modern craftspeople, our platform enables creators 
-                  to prove authenticity, protect their work, and build lasting relationships with conscious consumers.
-                </p>
-                <div className="flex flex-wrap gap-4">
-                  <div className="flex items-center gap-2 bg-white/10 px-4 py-2 rounded-full">
-                    <CheckCircle className="w-5 h-5 text-green-400" />
-                    <span className="text-sm font-semibold text-white">Zero Setup Fees</span>
-                  </div>
-                  <div className="flex items-center gap-2 bg-white/10 px-4 py-2 rounded-full">
-                    <CheckCircle className="w-5 h-5 text-green-400" />
-                    <span className="text-sm font-semibold text-white">Instant Verification</span>
-                  </div>
-                </div>
-              </div>
-              
-              <div className="space-y-4">
-                {[
-                  { label: 'Textile Artists', value: '45%' },
-                  { label: 'Jewelry Makers', value: '30%' },
-                  { label: 'Woodworkers', value: '25%' },
-                ].map((item, i) => (
-                  <div key={i}>
-                    <div className="flex justify-between mb-2">
-                      <span className="text-white/80 font-medium">{item.label}</span>
-                      <span className="text-purple-400 font-bold">{item.value}</span>
-                    </div>
-                    <div className="h-3 bg-white/10 rounded-full overflow-hidden">
-                      <div 
-                        className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full"
-                        style={{ width: item.value }}
-                      ></div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Final CTA Section */}
-      <section className="container mx-auto px-6 py-24">
-        <div className="max-w-4xl mx-auto text-center">
-          <div className="relative">
-            <div className="absolute inset-0 bg-gradient-to-r from-purple-600/20 to-pink-600/20 blur-3xl rounded-full"></div>
-            <div className="relative bg-gradient-to-br from-white/5 to-white/10 backdrop-blur-xl border border-white/20 rounded-3xl p-12 md:p-16">
-              <h2 className="text-4xl md:text-6xl font-black text-white mb-6">
-                Ready to Transform Your Business?
-              </h2>
-              <p className="text-xl text-white/70 mb-10 max-w-2xl mx-auto">
-                Join hundreds of artisans leveraging blockchain technology to build trust, 
-                verify authenticity, and grow their brand.
-              </p>
-              
-              {!isAuthenticated ? (
-                <div className="flex flex-col sm:flex-row gap-5 justify-center mb-8">
-                  <button 
-                    onClick={() => openAuthModal('register')}
-                    disabled={loading}
-                    className="group relative overflow-hidden bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white font-bold px-10 py-5 rounded-2xl transition-all duration-300 transform hover:scale-105 shadow-2xl disabled:opacity-50"
-                  >
-                    <div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 transform -skew-x-12 -translate-x-full group-hover:translate-x-full transition-transform duration-1000"></div>
-                    <span className="relative flex items-center justify-center gap-3 text-lg">
-                      <UserPlus className="w-5 h-5" />
-                      {loading ? 'Connecting...' : 'Get Started Now'}
-                    </span>
-                  </button>
-                  
-                  <a 
-                    href="https://docs.example.com" 
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="bg-white/10 hover:bg-white/20 backdrop-blur-xl border border-white/20 text-white font-bold px-10 py-5 rounded-2xl transition-all duration-300 flex items-center justify-center gap-3 text-lg"
-                  >
-                    Read Documentation
-                    <FileText className="w-5 h-5" />
-                  </a>
-                </div>
-              ) : (
-                <div className="flex flex-col sm:flex-row gap-5 justify-center mb-8">
-                  <Link 
-                    href="/mint" 
-                    className="group relative overflow-hidden bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white font-bold px-10 py-5 rounded-2xl transition-all duration-300 transform hover:scale-105 shadow-2xl"
-                  >
-                    <div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 transform -skew-x-12 -translate-x-full group-hover:translate-x-full transition-transform duration-1000"></div>
-                    <span className="relative flex items-center justify-center gap-3 text-lg">
-                      Create Your First Batch
-                      <ArrowRight className="w-5 h-5" />
-                    </span>
-                  </Link>
-                  
-                  <a 
-                    href="https://docs.example.com" 
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="bg-white/10 hover:bg-white/20 backdrop-blur-xl border border-white/20 text-white font-bold px-10 py-5 rounded-2xl transition-all duration-300 flex items-center justify-center gap-3 text-lg"
-                  >
-                    Read Documentation
-                    <FileText className="w-5 h-5" />
-                  </a>
-                </div>
-              )}
-
-              <p className="text-sm text-white/40">
-                No credit card required • Live on Sepolia Testnet
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Modern Footer */}
-      <footer className="border-t border-white/10 bg-black/30 backdrop-blur-xl">
-        <div className="container mx-auto px-6 py-12">
-          <div className="grid md:grid-cols-4 gap-12 mb-12">
-            <div>
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-xl">
-                  🧵
-                </div>
-                <span className="text-xl font-black text-white">CraftChain</span>
-              </div>
-              <p className="text-white/60 text-sm leading-relaxed">
-                Blockchain-powered authenticity verification for modern artisans.
-              </p>
-            </div>
-            
-            <div>
-              <h4 className="text-white font-bold mb-4">Product</h4>
-              <ul className="space-y-2 text-white/60 text-sm">
-                <li><Link href="/mint" className="hover:text-purple-400 transition-colors">Create Batch</Link></li>
-                <li><Link href="/view" className="hover:text-purple-400 transition-colors">Track Batch</Link></li>
-                <li><a href="#" className="hover:text-purple-400 transition-colors">Features</a></li>
-                <li><a href="#" className="hover:text-purple-400 transition-colors">Pricing</a></li>
-              </ul>
-            </div>
-            
-            <div>
-              <h4 className="text-white font-bold mb-4">Resources</h4>
-              <ul className="space-y-2 text-white/60 text-sm">
-                <li><a href="#" className="hover:text-purple-400 transition-colors">Documentation</a></li>
-                <li><a href="#" className="hover:text-purple-400 transition-colors">API Reference</a></li>
-                <li><a href="#" className="hover:text-purple-400 transition-colors">GitHub</a></li>
-                <li><a href="#" className="hover:text-purple-400 transition-colors">Community</a></li>
-              </ul>
-            </div>
-            
-            <div>
-              <h4 className="text-white font-bold mb-4">Network</h4>
-              <ul className="space-y-2 text-white/60 text-sm">
-                <li><a href="https://sepolia.etherscan.io" target="_blank" rel="noopener noreferrer" className="hover:text-purple-400 transition-colors">Sepolia Testnet</a></li>
-                <li><span className="text-xs text-white/40">Contract: {process.env.NEXT_PUBLIC_CONTRACT_ADDRESS?.substring(0, 8)}...</span></li>
-              </ul>
-            </div>
-          </div>
-          
-          <div className="pt-8 border-t border-white/10 flex flex-col md:flex-row justify-between items-center gap-4">
-            <p className="text-white/40 text-sm">
-              © 2025 CraftChain. Powered by Ethereum blockchain.
-            </p>
-            <div className="flex gap-6 text-white/40 text-sm">
-              <a href="#" className="hover:text-purple-400 transition-colors">Privacy</a>
-              <a href="#" className="hover:text-purple-400 transition-colors">Terms</a>
-              <a href="#" className="hover:text-purple-400 transition-colors">Security</a>
-            </div>
-          </div>
-        </div>
-      </footer>
+      </div>
     </div>
   );
 }
